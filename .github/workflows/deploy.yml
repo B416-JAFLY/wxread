@@ -46,6 +46,9 @@ jobs:
       env:
         WXREAD_CURL_BASH: ${{ secrets.WXREAD_CURL_BASH }}
         PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
+        BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
+        BARK_SERVER_URL: ${{ vars.BARK_SERVER_URL }}
+        BARK_LEVEL: ${{ vars.BARK_LEVEL }}
         PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

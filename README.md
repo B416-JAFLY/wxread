@@ -31,7 +31,7 @@
 
 - Fork这个仓库，在仓库 **Settings** -> 左侧列表中的 **Secrets and variables** -> **Actions**，然后在右侧的 **Repository secrets** 中添加如下值：
   - `WXREAD_CURL_BASH`：上面抓read接口后转换为curl_bash的数据。
-  - `PUSH_METHOD`：推送方法，4选1推送方式（pushplus、wxpusher、telegram、serverChan）。
+  - `PUSH_METHOD`：推送方法，可选 bark、pushplus、wxpusher、telegram、serverChan。
   - `PUSHPLUS_TOKEN` or `WXPUSHER_SPT` or `TELEGRAM_BOT_TOKEN`&`TELEGRAM_CHAT_ID` or `SERVERCHAN_SPT`: 选择推送后填写对应token。
   
 - 在 **Variables** 部分，最下方添加变量：
@@ -44,13 +44,21 @@
 | ------------------------- | ---------------------------------- | ------------------------------------------------------------ | --------- |
 | `WXREAD_CURL_BASH`         | `read` 接口 `curl_bash`数据 | **必填**，必须提供有效指令                                   | secrets   |
 | `READ_NUM`                 | 阅读次数（每次 30 秒）              | **可选**，阅读时长，默认 20 分钟                           | variables |
-| `PUSH_METHOD`              | `pushplus`/`wxpusher`/`telegram`/`serverchan`    | **可选**，推送方式，4选1，默认不推送                                       |    secrets     |
+| `PUSH_METHOD`              | `bark`/`pushplus`/`wxpusher`/`telegram`/`serverchan`    | **可选**，推送方式，默认不推送                                       |    secrets     |
+| `BARK_DEVICE_KEY`          | Bark 设备 Key                     | 当 `PUSH_METHOD=bark` 时必填；只保存 Key，不要提交完整推送 URL             | secrets   |
+| `BARK_SERVER_URL`          | Bark 服务地址                     | **可选**，默认 `https://api.day.app`                                    | variables |
+| `BARK_LEVEL`               | Bark 通知级别                     | **可选**，默认 `active`                                                  | variables |
 | `PUSHPLUS_TOKEN`           | PushPlus 的 token                   | 当 `PUSH_METHOD=pushplus` 时必填，[获取地址](https://www.pushplus.plus/uc.html) | secrets   |
 | `WXPUSHER_SPT`             | WxPusher 的token                    | 当 `PUSH_METHOD=wxpusher` 时必填，[获取地址](https://wxpusher.zjiecode.com/docs/#/?id=获取spt) | secrets   |
 | `TELEGRAM_BOT_TOKEN`  <br>`TELEGRAM_CHAT_ID`   <br>`http_proxy`/`https_proxy`（可选）| 群组id以及机器人token                 | 当 `PUSH_METHOD=telegram` 时必填，[配置文档](https://www.nodeseek.com/post-22475-1) | secrets   |
 | `SERVERCHAN_SPT`          | serverchan 的 SendKey               | 当 `PUSH_METHOD=serverchan` 时必填，[获取地址](https://sct.ftqq.com/sendkey) | secrets   |
 
-**重要：除了READ_NUM配置在varables，其它的都配置在secrets里面的；需要推送`PUSH_METHOD`是必填的。**
+**重要：`READ_NUM`、`BARK_SERVER_URL`、`BARK_LEVEL` 配置在 variables；账号凭据、设备 Key 和 `PUSH_METHOD` 配置在 secrets。需要推送时 `PUSH_METHOD` 是必填的。**
+
+脚本每次运行开始都会调用微信读书续签接口，并更新服务端返回的
+`wr_vid`、`wr_skey`、`wr_pf`、`wr_rt` 等会话 Cookie。短期 Cookie 可自动续签；
+如果基础网页登录会话被服务端撤销，则无法像 OAuth refresh token 一样无感重新登录，
+脚本会停止重试并通过已配置的推送渠道提醒重新登录、更新 `WXREAD_CURL_BASH`。
 
 ### 视频教程
 

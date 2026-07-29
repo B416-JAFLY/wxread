@@ -4,6 +4,7 @@ import time
 import random
 import logging
 import hashlib
+import os
 import requests
 import urllib.parse
 from push import push
@@ -17,6 +18,11 @@ READ_URL = "https://weread.qq.com/web/book/read"
 RENEW_URL = "https://weread.qq.com/web/login/renewal"
 FIX_SYNCKEY_URL = "https://weread.qq.com/web/book/chapterInfos"
 COOKIE_DATA_VARIANTS = [{"rq": "%2Fweb%2Fbook%2Fread", "ql": False},{"rq": "%2Fweb%2Fbook%2Fread", "ql": True},{"rq": "%2Fweb%2Fbook%2Fread"},]
+MAX_SESSION_RECOVERIES = 2
+
+
+class SessionExpiredError(RuntimeError):
+    """微信读书登录态无法继续自动续签。"""
 
 
 def encode_data(data):
@@ -38,81 +44,166 @@ def cal_hash(input_string):
 
     return hex(_7032f5 + _cc1055)[2:].lower()
 
-def get_wr_skey():
-    """刷新cookie密钥"""
+session = requests.Session()
+session.headers.update(headers)
+session.cookies.update(cookies)
+
+
+def renew_session():
+    """续签短期会话，并保留服务端返回的全部登录 Cookie。"""
     for cookie_data in COOKIE_DATA_VARIANTS:
         try:
-            response = requests.post(RENEW_URL,headers=headers,cookies=cookies,data=json.dumps(cookie_data, separators=(',', ':')),timeout=10)
-            
-            if 'wr_skey' in response.cookies:
-                return response.cookies['wr_skey'][:8]
-            else:
-                continue
+            response = session.post(
+                RENEW_URL,
+                data=json.dumps(cookie_data, separators=(',', ':')),
+                timeout=15,
+            )
+            response.raise_for_status()
+            result = response.json()
+            renewed = response.cookies.get_dict()
+            if result.get("succ") == 1 and "wr_skey" in renewed:
+                cookies.update(renewed)
+                session.cookies.clear()
+                session.cookies.update(cookies)
+                logging.info(
+                    "会话续签成功，已更新 Cookie：%s",
+                    ", ".join(sorted(renewed)),
+                )
+                return renewed
         except requests.RequestException as exc:
-            logging.warning(f"refresh_cookie 请求失败，payload={cookie_data}，原因：{exc}")
-            continue
-        
-        
-    return None
+            logging.warning("会话续签请求失败：%s", exc)
+        except ValueError:
+            logging.warning("会话续签返回了无法解析的响应。")
+
+    raise SessionExpiredError(
+        "微信读书登录态已失效，自动续签失败；请重新登录并更新 WXREAD_CURL_BASH。"
+    )
 
 def fix_no_synckey():
-    requests.post(FIX_SYNCKEY_URL, headers=headers, cookies=cookies,data=json.dumps({"bookIds":["3300060341"]}, separators=(',', ':')))
+    response = session.post(
+        FIX_SYNCKEY_URL,
+        data=json.dumps({"bookIds":["3300060341"]}, separators=(',', ':')),
+        timeout=15,
+    )
+    response.raise_for_status()
 
 refresh_print = setup_logging()
 
-def refresh_cookie():
-    logging.info("刷新 cookie")
-    new_skey = get_wr_skey()
-    if new_skey:
-        cookies['wr_skey'] = new_skey
-        logging.info(f"密钥刷新成功，新密钥：{new_skey[:2]}***")
-        logging.info("重新本次阅读。")
-    else:
-        ERROR_CODE = "无法获取新密钥或者 WXREAD_CURL_BASH 配置有误，终止运行。"
-        logging.error(ERROR_CODE)
-        push(ERROR_CODE, PUSH_METHOD, is_success=False)
-        raise Exception(ERROR_CODE)
+def workflow_run_url():
+    server = os.getenv("GITHUB_SERVER_URL")
+    repository = os.getenv("GITHUB_REPOSITORY")
+    run_id = os.getenv("GITHUB_RUN_ID")
+    if server and repository and run_id:
+        return f"{server}/{repository}/actions/runs/{run_id}"
+    return ""
 
-refresh_cookie()
-index = 1
-lastTime = int(time.time()) - 30
-logging.info(f"一共需要阅读 {READ_NUM} 次。")
 
-while index <= READ_NUM:
-    data.pop('s')
-    data['b'] = random.choice(book)
-    data['c'] = random.choice(chapter)
-    thisTime = int(time.time())
-    data['ct'] = thisTime
-    data['rt'] = thisTime - lastTime
-    data['ts'] = int(thisTime * 1000) + random.randint(0, 1000)
-    data['rn'] = random.randint(0, 1000)
-    data['sg'] = hashlib.sha256(f"{data['ts']}{data['rn']}{KEY}".encode()).hexdigest()
-    data['s'] = cal_hash(encode_data(data))
+def notify_result(content, is_success):
+    if PUSH_METHOD in (None, ""):
+        logging.info("未配置推送渠道，跳过推送。")
+        return False
+    logging.info("开始推送执行结果...")
+    delivered = push(content, PUSH_METHOD, is_success=is_success)
+    if not delivered:
+        logging.warning("结果推送失败，但不改变阅读任务的执行结果。")
+    return delivered
 
-    refresh_print(f"阅读进度: 第 {index}/{READ_NUM} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
-    logging.debug("data: %s", data)
-    response = requests.post(READ_URL, headers=headers, cookies=cookies, data=json.dumps(data, separators=(',', ':')))
-    resData = response.json()
-    logging.debug("response: %s", resData)
 
-    if 'succ' in resData:
-        if 'synckey' in resData:
-            lastTime = thisTime
-            index += 1
-            time.sleep(30)
-            refresh_print(f"阅读进度: 第 {min(index, READ_NUM + 1) - 1}/{READ_NUM} 次，已完成 {(index - 1) * 0.5:.1f} 分钟")
-        else:
-            logging.warning("无 synckey，尝试修复...")
-            fix_no_synckey()
-    else:
-        logging.warning("cookie 已过期，尝试刷新...")
-        refresh_cookie()
+def run():
+    index = 1
+    last_time = int(time.time()) - 30
+    recoveries = 0
 
-logging.info("阅读脚本已完成。")
+    try:
+        logging.info("开始续签微信读书会话。")
+        renew_session()
+        logging.info("一共需要阅读 %d 次。", READ_NUM)
 
-if PUSH_METHOD not in (None, ''):
-    logging.info("开始推送...")
-    push(f"微信读书自动阅读完成。\n阅读时长：{(index - 1) * 0.5} 分钟。", PUSH_METHOD, is_success=True)
-else:
-    logging.info("未配置推送渠道，跳过推送。")
+        while index <= READ_NUM:
+            data.pop("s", None)
+            data["b"] = random.choice(book)
+            data["c"] = random.choice(chapter)
+            this_time = int(time.time())
+            data["ct"] = this_time
+            data["rt"] = this_time - last_time
+            data["ts"] = int(this_time * 1000) + random.randint(0, 1000)
+            data["rn"] = random.randint(0, 1000)
+            data["sg"] = hashlib.sha256(
+                f"{data['ts']}{data['rn']}{KEY}".encode()
+            ).hexdigest()
+            data["s"] = cal_hash(encode_data(data))
+
+            refresh_print(
+                f"阅读进度: 第 {index}/{READ_NUM} 次，"
+                f"已完成 {(index - 1) * 0.5:.1f} 分钟"
+            )
+            logging.debug("data: %s", data)
+
+            try:
+                response = session.post(
+                    READ_URL,
+                    data=json.dumps(data, separators=(",", ":")),
+                    timeout=20,
+                )
+                response.raise_for_status()
+                result = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                logging.warning("阅读请求失败：%s", exc)
+                result = {}
+
+            logging.debug("response: %s", result)
+
+            if result.get("succ") == 1 and "synckey" in result:
+                last_time = this_time
+                index += 1
+                recoveries = 0
+                time.sleep(30)
+                refresh_print(
+                    f"阅读进度: 第 {min(index, READ_NUM + 1) - 1}/{READ_NUM} 次，"
+                    f"已完成 {(index - 1) * 0.5:.1f} 分钟"
+                )
+                continue
+
+            recoveries += 1
+            if recoveries > MAX_SESSION_RECOVERIES:
+                raise SessionExpiredError(
+                    "连续恢复登录态失败；请重新登录微信读书并更新 WXREAD_CURL_BASH。"
+                )
+
+            if result.get("succ") == 1:
+                logging.warning("响应缺少 synckey，尝试修复并续签会话。")
+                fix_no_synckey()
+            else:
+                logging.warning("登录态可能已过期，尝试自动续签。")
+            renew_session()
+            time.sleep(2)
+
+        completed = index - 1
+        minutes = completed * 0.5
+        logging.info("阅读脚本已完成。")
+        message = (
+            "微信读书自动阅读完成。\n"
+            f"完成次数：{completed}/{READ_NUM}\n"
+            f"阅读时长：{minutes:.1f} 分钟"
+        )
+        run_url = workflow_run_url()
+        if run_url:
+            message += f"\n运行记录：{run_url}"
+        notify_result(message, is_success=True)
+    except Exception as exc:
+        completed = index - 1
+        logging.error("阅读脚本失败：%s", exc)
+        message = (
+            "微信读书自动阅读失败。\n"
+            f"完成次数：{completed}/{READ_NUM}\n"
+            f"原因：{exc}"
+        )
+        run_url = workflow_run_url()
+        if run_url:
+            message += f"\n运行记录：{run_url}"
+        notify_result(message, is_success=False)
+        raise
+
+
+if __name__ == "__main__":
+    run()
