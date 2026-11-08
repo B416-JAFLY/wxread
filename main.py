@@ -19,6 +19,8 @@ RENEW_URL = "https://weread.qq.com/web/login/renewal"
 FIX_SYNCKEY_URL = "https://weread.qq.com/web/book/chapterInfos"
 COOKIE_DATA_VARIANTS = [{"rq": "%2Fweb%2Fbook%2Fread", "ql": False},{"rq": "%2Fweb%2Fbook%2Fread", "ql": True},{"rq": "%2Fweb%2Fbook%2Fread"},]
 MAX_SESSION_RECOVERIES = 2
+REQUEST_TIMEOUT = (10, 30)
+AUTH_ERROR_CODES = {-2012, -2013}
 
 
 class SessionExpiredError(RuntimeError):
@@ -56,7 +58,7 @@ def renew_session():
             response = session.post(
                 RENEW_URL,
                 data=json.dumps(cookie_data, separators=(',', ':')),
-                timeout=15,
+                timeout=REQUEST_TIMEOUT,
             )
             response.raise_for_status()
             result = response.json()
@@ -83,7 +85,7 @@ def fix_no_synckey():
     response = session.post(
         FIX_SYNCKEY_URL,
         data=json.dumps({"bookIds":["3300060341"]}, separators=(',', ':')),
-        timeout=15,
+        timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
 
@@ -116,7 +118,10 @@ def run():
 
     try:
         logging.info("开始续签微信读书会话。")
-        renew_session()
+        try:
+            renew_session()
+        except SessionExpiredError:
+            logging.warning("启动时续签失败，保留现有 Cookie 继续尝试阅读。")
         logging.info("一共需要阅读 %d 次。", READ_NUM)
 
         while index <= READ_NUM:
@@ -143,7 +148,7 @@ def run():
                 response = session.post(
                     READ_URL,
                     data=json.dumps(data, separators=(",", ":")),
-                    timeout=20,
+                    timeout=REQUEST_TIMEOUT,
                 )
                 response.raise_for_status()
                 result = response.json()
@@ -174,7 +179,15 @@ def run():
                 logging.warning("响应缺少 synckey，尝试修复并续签会话。")
                 fix_no_synckey()
             else:
-                logging.warning("登录态可能已过期，尝试自动续签。")
+                err_code = result.get("errCode")
+                logging.warning(
+                    "read 接口返回异常：errCode=%s，errMsg=%s",
+                    err_code, result.get("errMsg"),
+                )
+                if err_code in AUTH_ERROR_CODES:
+                    logging.warning("检测到登录/鉴权异常，尝试自动续签。")
+                else:
+                    logging.warning("尝试自动续签后重新阅读。")
             renew_session()
             time.sleep(2)
 
